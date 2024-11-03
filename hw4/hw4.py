@@ -1,8 +1,10 @@
 import numpy as np 
 import matplotlib.pyplot as plt
+from tqdm import tqdm
 from numba import jit
-MAX_ITERATION = 5000
-np.random.seed(13)
+MAX_ITERATION_REGRESSION = 5000
+MAX_ITERATION_EM = 50
+np.random.seed(0)
 # Utils
 np.set_printoptions(threshold=np.inf)
         
@@ -36,7 +38,6 @@ def read_idx1_ubyte(fpth:str):
     return label, label_type
 
 # Part1: Logistic regression
-
 class LR:
     @staticmethod
     def get_design_matrix(arr):
@@ -102,7 +103,7 @@ def logistic_regression(N, means, variances):
     phi = LR.get_design_matrix(D)
     # Gradient descent
     lrs = {0: 1e-3, 100:1e-1, 500:5e-4}    
-    for i in range(MAX_ITERATION):
+    for i in range(MAX_ITERATION_REGRESSION):
         lr = lrs[i] if i in lrs else lr
         gradient = phi.T @ (LR.logistic(phi@Wg) - Label)
         Wg = Wg - lr * gradient
@@ -116,7 +117,7 @@ def logistic_regression(N, means, variances):
     # Newton's Method
     Wn = np.zeros((3,1))
     prior_Wn = np.zeros_like(Wn)
-    for i in range(MAX_ITERATION):
+    for i in range(MAX_ITERATION_REGRESSION):
         fx = LR.logistic(phi@Wn)
         gradient = phi.T @ (fx - Label)
         
@@ -162,36 +163,51 @@ def plot_LR_result(D1, D2, Wg, Wn, threshold=0.5):
     axes[2].legend()
     plt.show()
 
-
 # Part2: MNIST classifier via EM algorithm
-
 class EMModel:
-    def __init__(self, rows, cols, label_type):
+    def __init__(self, rows, cols, label_type, batch_size=30):
         self.im_shape = (rows, cols)
         self.label_type = label_type
         
-        self.prob_head = np.random.uniform(0, 1, (self.num_cls, rows*cols))
-        self.prob_choose = np.ones((self.num_cls, rows*cols)) / len(label_type) 
+        self.prob_head = np.random.uniform(0, 1, (self.num_cls, self.size)) # (num_class, size)
+        # self.prob_head = np.ones((self.num_cls, self.size))*0.5
+        self.prob_choose = np.full((self.num_cls, self.size), 1/self.num_cls, dtype=np.float64)
         
+        self.batch_size = batch_size
     def E_step(self, data):
         '''responsibility: (num_data * num_class * size) array
         here we want to get the responsibility of each pixel at each given image.
         '''
         num_data = data.shape[0]
-        tmp_data = data.reshape(num_data, 1, self.size)  # (num data, 1, size)
+        tmp_data = data.copy().reshape(num_data, 1, self.size)  # (num data, 1, size)
         tmp_prob_head = self.prob_head.reshape(1, self.num_cls, self.size)  # (1, num class, size)
         tmp_prob_choose = self.prob_choose.reshape(1, self.num_cls, self.size) # (1, num class, size)
         responsibility = tmp_prob_choose*(tmp_data*tmp_prob_head + (1- tmp_data) * (1-tmp_prob_head)) # (num_data, num_class, size)
         # Normalize responsibility
         sum_across_class = np.zeros((num_data, 1, self.size)) # (num_data, 1, size)
         for cc in range(self.num_cls):    
-            sum_across_class += responsibility[:, [cc], :]
-            
+            sum_across_class += responsibility[:, cc:cc+1, :]
+        sum_across_class[sum_across_class< 1e-4] = np.inf
+        
         responsibility =  responsibility/sum_across_class
         return responsibility
         
-    def M_step(self, data, responsibility):...
-
+    def M_step(self, data, responsibility):
+        def __sum_across_data(arr):
+            summation = np.zeros(arr.shape[1:])
+            for ii in range(arr.shape[0]):
+                summation += arr[ii, :, :]
+            return summation
+        num_data = data.shape[0]
+        # Update prob_choose
+        res_sum = __sum_across_data(responsibility)
+        res_sum[res_sum < 1e-4] = np.inf
+        new_prob_choose = res_sum / num_data   # * Something I can't derive the correct answer bute it works.
+        # Update prob head
+        nominator = __sum_across_data( responsibility * data.copy().reshape(num_data, 1, self.size))
+        new_prob_head = nominator / res_sum
+        
+        return new_prob_choose, new_prob_head
     @property
     def num_cls(self):
         return len(self.label_type)
@@ -199,38 +215,131 @@ class EMModel:
     def size(self):
         return self.im_shape[0] * self.im_shape[1]
     
-    def fit(self, data):
-        for i in range(MAX_ITERATION):
-            responsibility = self.E_step(data)
-            self.M_step(data, responsibility)
+    def load_batch(self, data):
+        num_data = data.shape[0]
+        tmp_data = np.copy(data)
+        np.random.shuffle(tmp_data) # Shuffle along first axis
+        for indx in range( self.batch_size, num_data+1, self.batch_size):
+            yield tmp_data[indx-self.batch_size:indx]
             
-    def predict(self, data):
-        ...
+    def fit(self, train_data, SAVE_WEIGHT=True, wc_pth="", wh_pth=""):
+        for i in tqdm(range(MAX_ITERATION_EM), desc="EM Training: "):
+            old_prob_choose, old_prob_head = self.prob_choose, self.prob_head
+        
+            for batch_data in self.load_batch(train_data):
+                responsibility = self.E_step(batch_data)
+                self.prob_choose, self.prob_head = self.M_step(batch_data, responsibility)
+            # plot_likelihood_images(self.get_likelihood_image())
+                
+            if self.converge_criterion(old_prob_choose, old_prob_head):
+                print("After {i} iterations, training converge!")
+                break
+        else:
+            print(f"End of {MAX_ITERATION_EM} iterations.")
+        if SAVE_WEIGHT:
+            np.save(wc_pth, self.prob_choose)
+            np.save(wh_pth, self.prob_head)
+            print("Save weight.")
+        
+    def converge_criterion(self, old_prob_choose, old_prob_head):
+        condition1 = np.abs( self.prob_choose - old_prob_choose) < 1e-3
+        condition2 = np.abs( self.prob_head - old_prob_head) < 1e-2
+        ratio1 = np.sum(condition1)/ (self.num_cls*self.size)
+        ratio2 = np.sum(condition2)/ (self.num_cls*self.size)
+        print(f"Condition 1: {ratio1*100:.2f}% | Condition 2: {ratio2*100:.2f}%")
+        
+        return True if ratio1> 0.8 and ratio2 > 0.7 else False
+        
+    def load_pretrained(self, wc_pth:str, wh_pth:str) -> None:
+        self.prob_choose = np.load(wc_pth)
+        self.prob_head = np.load(wh_pth)
+    
+    def assign_class(self, train_data, train_label):
+        '''Use voting system to determine which class belongs to which number.'''
+        preds = self.predict(train_data)
+        
+        
+    def predict(self, pred_data):
+        '''For each data'''
+        num_data = pred_data.shape[0]
+        tmp_data =pred_data.reshape(num_data, 1 , self.size)
+        tmp_prob_head = self.prob_head.copy().reshape(1, self.num_cls, self.size)
+        tmp_prob_choose = self.prob_choose.copy().reshape(1, self.num_cls, self.size)
+        log_likelihoods = np.log(tmp_prob_choose*(tmp_data*tmp_prob_head + (1-tmp_data) * (1-tmp_prob_head)))
+        
+        data_log_likelihoods = np.zeros((num_data, self.num_cls), dtype=np.float64)
+        for sz in range(self.size):
+            data_log_likelihoods += log_likelihoods[:, :, sz]
+        results = np.argmax(data_log_likelihoods, axis=1)
+        return results.flatten()
+        
     def confusion_matrix(self, pred, label):
         ...
-    def get_likelihood_image(self):
-        ...
+    def get_likelihood_image(self, threshold =0.5):
+        self.matching = {i:i for i in range(self.num_cls)}
+        images = {
+            self.matching[i]: (image>threshold).reshape(self.im_shape)
+                for i, (image) in enumerate(self.prob_head)
+        }
+        return images
     
-def em_algorithm(rows, cols, train_data, test_data, test_label, label_type):
-    num_cls = len(label_type)
-    em_model = EMModel(rows, cols, label_type)
-    em_model.fit(train_data)
+def em_algorithm(rows, cols, train_data, train_label, test_data, test_label, label_type):
+    global args
+    em_model = EMModel(rows, cols, label_type, batch_size=args.batch_size)
+    plot_likelihood_images(em_model.get_likelihood_image())
+    
+    if args.em_mode == "train":
+        em_model.fit(train_data, 
+                     SAVE_WEIGHT=args.save_weight, 
+                     wc_pth=args.prob_choose_pth, 
+                     wh_pth=args.prob_head_pth)
+    elif args.em_mode == "load":
+        em_model.load_pretrained(args.prob_choose_pth, args.prob_head_pth)
+    
+    # em_model.assign_class(train_data, train_label)
+    # em_model.predict(train_data)
+    plot_likelihood_images(em_model.get_likelihood_image())
+    
+    
+def plot_likelihood_images(images:dict):
+    fig = plt.figure("likelihood images", figsize=(10,5))
+    axes = fig.subplots(2,5 )
+    axes = axes.flatten()
+    for i, ax in enumerate(axes):
+        img = images[i].astype(np.uint8) *255
+        
+        ax.imshow(img, cmap='gray')
+        ax.set_title(f"digit: {i}")
+        ax.axis('off') 
+    fig.tight_layout()
+    plt.show()
+    
+    # plt.pause(1)
     
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(prog="Machine Learning Homework 4.")
     parser.add_argument("mode", type=str, help="LR | EM")
+    
+    # EM setting
+    parser.add_argument("--em_mode", type=str, default="train", help="train | load")
+    parser.add_argument("--batch_size", type=int, default=30)
+    parser.add_argument("--save_weight", action="store_true")
+    parser.add_argument("--prob_choose_pth", type=str, default="./prob_choose.npy")
+    parser.add_argument("--prob_head_pth", type=str, default="./prob_head.npy")
     args = parser.parse_args()
-    if args.mode == "mode":
+    
+    if args.mode == "LR":
         N = int(input("N: "))
         means = [float(ii) for ii in str(input("mx1, my1, mx2, my2: ")).split(" ")]
         variances = [float(ii) for ii in str(input("vx1, vy1, vx2, vy2: ")).split(" ")]
         logistic_regression(N, means, variances)
     elif args.mode == "EM":
         rows, cols, train_data = read_idx3_ubyte("./data/train-images.idx3-ubyte_", threshold=127)
+        train_label, label_type = read_idx1_ubyte("./data/train-labels.idx1-ubyte_")
         _, _, test_data = read_idx3_ubyte("./data/t10k-images.idx3-ubyte_", threshold=127)
         test_label, label_type = read_idx1_ubyte("./data/t10k-labels.idx1-ubyte_")
         
-        em_algorithm(rows, cols, train_data, test_data, test_label, label_type)
+        em_algorithm(rows, cols, train_data, train_label, test_data, test_label, label_type)
     else:
-        raise "Wrong input mode."
+        assert False, "Wrong input mode."
