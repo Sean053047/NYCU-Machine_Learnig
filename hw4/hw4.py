@@ -2,9 +2,12 @@ import numpy as np
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 from numba import jit
+from pathlib import Path
+from datetime import datetime
+import time
 MAX_ITERATION_REGRESSION = 5000
-MAX_ITERATION_EM = 50
-np.random.seed(0)
+MAX_ITERATION_EM = 80
+np.random.seed(51)
 # Utils
 np.set_printoptions(threshold=np.inf)
         
@@ -69,8 +72,8 @@ class LR:
         }
         
         return record
-    @classmethod
-    def print_result(cls, title:str, W, record):
+    @staticmethod
+    def print_result(title:str, W, record):
         print("="*20)
         print(f"{title}:")
         print(f"W:")
@@ -79,11 +82,37 @@ class LR:
         print("\nConfusion Matrix:")
         print("\t\tPredict cluster 1\tPredict cluster 2")
         print(f"Is cluster 1\t\t{record[(0, 0)]}\t\t\t{record[(0, 1)]}")
-        print(f"Is cluster 2\t\t{record[(1, 0)]}\t\t\t{record[(1, 1)]}")
+        print(f"Isn't cluster 2\t\t{record[(1, 0)]}\t\t\t{record[(1, 1)]}")
         print("")
         print(f"Specificity: (Successfully predict cluster 1 (0)): ", record[(0,0)] / (record[(0,0)] + record[(1,0)]))
         print(f"Sensitivity: (Successfully predict cluster 2 (1)): ", record[(1,1)] / (record[(0,1)] + record[(1,1)]))
         print("="*20)
+
+def plot_LR_result(D1, D2, Wg, Wn, threshold=0.5):
+    '''
+    D: N*2
+    '''
+    _, axes = plt.subplots(1,3)
+    axes = axes.flatten()
+    # Plot Ground Truth
+    axes[0].scatter(D1[:,0], D1[:, 1], label='D1',color='r')
+    axes[0].scatter(D2[:,0], D2[:, 1], label='D2',color='b')
+    axes[0].set_title("Ground Truth")
+    axes[0].legend()
+    
+    D = np.concatenate((D1, D2), axis=0)
+    pred_g = LR.predict(D, Wg, threshold)
+    axes[1].scatter(D[pred_g==0, 0], D[pred_g==0, 1], label='D1', color='r')
+    axes[1].scatter(D[pred_g==1, 0], D[pred_g==1, 1], label='D2', color='b')
+    axes[1].set_title("Steepest Descent")
+    axes[1].legend()
+    
+    pred_n = LR.predict(D, Wn, threshold)
+    axes[2].scatter(D[pred_n==0, 0], D[pred_n==0, 1], label='D1', color='r')
+    axes[2].scatter(D[pred_n==1, 0], D[pred_n==1, 1], label='D2', color='b')
+    axes[2].set_title("Newton's Method")
+    axes[2].legend()
+    plt.show()
 
 def logistic_regression(N, means, variances):
     # Generate data
@@ -124,7 +153,8 @@ def logistic_regression(N, means, variances):
         D_matrix = np.diag((fx*(1-fx)).flatten())
         hessian = phi.T @ D_matrix @ phi
         if np.linalg.det(hessian) ==0:
-            # print(f"Determinant: {hessian}, determinant: {np.linalg.det(hessian)}")
+            
+            print(f"Determinant: {hessian}, determinant: {np.linalg.det(hessian)}")
             hessian = np.eye(gradient.shape[0]) * 1e-4
         Wn = Wn - np.linalg.inv(hessian) @ gradient
         if np.linalg.norm(Wn - prior_Wn) < 1e-4:
@@ -134,103 +164,18 @@ def logistic_regression(N, means, variances):
     else:
         print(f"Jump out loop-Newton's method.\nIterate {i+1} times.")
     LR.print_result("Newton's Method", Wn, record=LR.get_confusion_matrix(D, Wn, Label))
-    
     plot_LR_result(D1, D2, Wg, Wn)
     
-def plot_LR_result(D1, D2, Wg, Wn, threshold=0.5):
-    '''
-    D: N*2
-    '''
-    _, axes = plt.subplots(1,3)
-    axes = axes.flatten()
-    # Plot Ground Truth
-    axes[0].scatter(D1[:,0], D1[:, 1], label='D1',color='r')
-    axes[0].scatter(D2[:,0], D2[:, 1], label='D2',color='b')
-    axes[0].set_title("Ground Truth")
-    axes[0].legend()
-    
-    D = np.concatenate((D1, D2), axis=0)
-    pred_g = LR.predict(D, Wg, threshold)
-    axes[1].scatter(D[pred_g==0, 0], D[pred_g==0, 1], label='D1', color='r')
-    axes[1].scatter(D[pred_g==1, 0], D[pred_g==1, 1], label='D2', color='b')
-    axes[1].set_title("Steepest Descent")
-    axes[1].legend()
-    
-    pred_n = LR.predict(D, Wn, threshold)
-    axes[2].scatter(D[pred_n==0, 0], D[pred_n==0, 1], label='D1', color='r')
-    axes[2].scatter(D[pred_n==1, 0], D[pred_n==1, 1], label='D2', color='b')
-    axes[2].set_title("Newton's Method")
-    axes[2].legend()
-    plt.show()
-
 # Part2: MNIST classifier via EM algorithm
 class EMModel:
     def __init__(self, rows, cols, label_type, batch_size=30):
         self.im_shape = (rows, cols)
         self.label_type = label_type
         
-        self.prob_head = np.random.uniform(0, 1, (self.num_cls, self.size)) # (num_class, size)
-        # self.prob_head = np.ones((self.num_cls, self.size))*0.5
-        self.prob_choose = np.full((self.num_cls, self.size), 1/self.num_cls, dtype=np.float64)
+        self.prob_head = np.random.rand(self.num_cls, self.size) # (num_class, size)
+        self.prob_choose = np.full((self.num_cls), 1/self.num_cls, dtype=np.float64) # (num_class)
         
         self.batch_size = batch_size
-    @staticmethod
-    def __sum_across_data(arr):
-        summation = np.zeros(arr.shape[1:])
-        for ii in range(arr.shape[0]):
-            summation += arr[ii, :, :]
-        return summation
-    
-    def E_step(self, data):
-        '''responsibility: (num_data * num_class * size) array
-        here we want to get the responsibility of each pixel at each given image.
-        '''
-        num_data = data.shape[0]
-        tmp_data = data.copy().reshape(num_data, 1, self.size)  # (num data, 1, size)
-        tmp_prob_head = self.prob_head.reshape(1, self.num_cls, self.size)  # (1, num class, size)
-        tmp_prob_choose = self.prob_choose.reshape(1, self.num_cls, self.size) # (1, num class, size)
-        
-        W = tmp_prob_choose* (tmp_data*tmp_prob_head + (1- tmp_data) * (1-tmp_prob_head))# (num_data, num_class, size)
-        # base = 100
-        # shift = 3
-        # print(np.any(responsibility == 0))
-        
-        # print(tmp_prob_head[0, 0, base:base+shift])
-        # print(tmp_prob_choose[0, 0, base:base+shift])
-        # print(tmp_data[0, 0, base:base+shift])
-        # print(responsibility[0, 0, base:base+shift])
-        # exit()
-        
-        # Normalize responsibility
-        marginal_W = np.zeros((num_data, 1, self.size)) # (num_data, 1, size)
-        for cc in range(self.num_cls):    
-            marginal_W += W[:, cc:cc+1, :]
-        marginal_W[marginal_W == 0] = 1e9
-        resp =  W/marginal_W
-        
-        # c1, c2, c3 = np.where(np.isnan(resp))
-        
-        # print( responsibility[np.where(np.isnan(resp))] )
-        # print(sum_across_class[ c1,0, c3])
-        # if np.any(np.isnan(resp)):
-            # print(responsibility)
-            # exit()
-        return resp
-        
-    def M_step(self, data, responsibility):
-            
-        num_data = data.shape[0]
-        # Update prob_choose
-        res_sum = self.__sum_across_data(responsibility)
-        new_prob_choose = res_sum / num_data   # * Something I can't derive the correct answer bute it works.
-        # Update prob head
-        nominator = self.__sum_across_data( responsibility * data.copy().reshape(num_data, 1, self.size))
-        res_sum[res_sum < 1e-10] = np.inf
-        new_prob_head = nominator / res_sum
-        
-        # print(np.any(np.isnan(new_prob_choose)), np.any(np.isnan(new_prob_head)))
-        
-        return new_prob_choose, new_prob_head
     @property
     def num_cls(self):
         return len(self.label_type)
@@ -238,24 +183,95 @@ class EMModel:
     def size(self):
         return self.im_shape[0] * self.im_shape[1]
     
+    @staticmethod
+    def __prod_across_size(arr, LOG_SCALE=False):
+        '''arr: 3D matrix'''
+        if LOG_SCALE:
+            arr = np.log(arr+ 1e-6)
+            product = np.zeros(arr.shape[0:2])
+            for sz in range(arr.shape[2]):
+                product += arr[:, :, sz]
+        else:
+            product = np.ones(arr.shape[0:2])
+            for sz in range(arr.shape[2]):
+                product *= arr[:, :, sz]
+        return product
+
+    def __likelihood(self, pred_data):
+        '''For each data'''
+        num_data = pred_data.shape[0]
+        tmp_data = pred_data.copy().reshape(num_data, 1, self.size)  # (num data, 1, size)
+        tmp_prob_head = self.prob_head.reshape(1, self.num_cls, self.size)  # (1, num class, size)
+        tmp_prob_choose = self.prob_choose.reshape(1, self.num_cls) # (1, num class)
+        
+        # lambda * Joint probabilities of all pixels (Log scale) 
+        log_likelihood = np.log(tmp_prob_choose + 1e-6) + self.__prod_across_size(tmp_data*tmp_prob_head + (1- tmp_data) * (1-tmp_prob_head), LOG_SCALE=True)
+        
+        # Normalize the likelihood of for each data
+        log_likelihood = log_likelihood - np.max(log_likelihood, axis=1, keepdims=True)
+        log_likelihood[ log_likelihood < -310] = -310 # Avoid from underflow
+        likelihood = np.exp(log_likelihood)
+        return likelihood
+        
     def load_batch(self, data):
         num_data = data.shape[0]
         tmp_data = np.copy(data)
         np.random.shuffle(tmp_data) # Shuffle along first axis
         for indx in range( self.batch_size, num_data+1, self.batch_size):
             yield tmp_data[indx-self.batch_size:indx]
-            
+    
+    def load_pretrained(self, wc_pth:str, wh_pth:str) -> None:
+        self.prob_choose = np.load(wc_pth)
+        self.prob_head = np.load(wh_pth)
+    
+    def E_step(self, data):
+        '''responsibility: (num_data * num_class * size) array
+        here we want to get the responsibility of each pixel at each given image.
+        '''
+        num_data = data.shape[0]
+        likelihood = self.__likelihood(data) # (num_data, num_cls)
+        if np.any(np.isnan(likelihood)):
+            exit()
+        marginal = np.zeros((num_data,1), dtype=np.float64)
+        for cc in range(self.num_cls):
+            marginal += likelihood[:, cc:cc+1]
+        marginal[marginal==0] = 1e10
+        W = likelihood / marginal# (num_data, num_class)
+        return W
+        
+    def M_step(self, data, W):
+        num_data = data.shape[0]
+        def __marginalize_data(arr):
+            shape = list(arr.shape); shape[0] = 1
+            summation = np.zeros(shape)
+            for nn in range(arr.shape[0]):
+                summation += arr[nn:nn+1]
+            return summation
+        # Update prob_choose
+        # ? Marginal across data
+        new_prob_choose = __marginalize_data(W) / num_data
+        # Update prob head
+        W = W.reshape(num_data, self.num_cls, 1)    # (num_data, num_class, 1)
+        data = data.reshape(num_data, 1, self.size) # (num_data,       1 , num_class)
+        new_prob_head = (__marginalize_data(W*data) / __marginalize_data(W))[0,:,:]
+        return new_prob_choose, new_prob_head
+    
     def fit(self, train_data, SAVE_WEIGHT=True, wc_pth="", wh_pth=""):
+        output_dir = Path(f"./log/{datetime.now().strftime('%m-%d_%H:%M:%S')}")
+        output_dir.mkdir(parents=True)
+        
         for i in tqdm(range(MAX_ITERATION_EM), desc="EM Training: "):
             old_prob_choose, old_prob_head = self.prob_choose, self.prob_head
         
             for batch_data in self.load_batch(train_data):
                 responsibility = self.E_step(batch_data)
                 self.prob_choose, self.prob_head = self.M_step(batch_data, responsibility)
-            # plot_likelihood_images(self.get_likelihood_image())
-                
-            if self.converge_criterion(old_prob_choose, old_prob_head):
-                print("After {i} iterations, training converge!")
+                if i % 5 == 3 and i != 0 and i < 50:
+                    self.merge_and_split()     # Add mechanism to merge those similar clusters.
+                prob_head_diff =np.sum(np.abs(self.prob_head-old_prob_head))
+                plot_likelihood_images(self.get_likelihood_image(), save_pth=output_dir/Path(f"{i}_diff:{prob_head_diff:.2f}.png"))
+                print(f"{i} iterations. difference: {prob_head_diff:.2f} ")
+            if self.converge_criterion(old_prob_choose, old_prob_head) and i >= 50:
                 break
         else:
             print(f"End of {MAX_ITERATION_EM} iterations.")
@@ -263,82 +279,156 @@ class EMModel:
             np.save(wc_pth, self.prob_choose)
             np.save(wh_pth, self.prob_head)
             print("Save weight.")
+        return i 
+    def merge_and_split(self, threshold = 0.1):
+        src = self.prob_head.copy().reshape(self.num_cls, 1, self.size)
+        src = np.where(src>threshold, src, 0.0)
+        tgt = self.prob_head.copy().reshape(1, self.num_cls, self.size)
+        tgt = np.where(tgt>threshold, tgt, 0.0)
+        diff = np.abs(src-tgt)
+        
+        aa = np.zeros((self.num_cls, self.num_cls))
+        for i in range(self.num_cls):
+            for j in range(self.num_cls):
+                aa[i,j] = np.mean(diff[i,j, :]) if i!= j else 10
+        aa[np.isnan(aa)] = 10
+        
+        closet_indx, distances = np.argmin(aa, axis=1), np.min(aa, axis=1)
+        # print(aa)
+        # print(closet_indx, distances)
+        change = 0
+        for i in range(self.num_cls-1, -1, -1):
+            indx, dist = closet_indx[i], distances[i]
+            if indx >= i: continue
+            if dist < 8*1e-2:
+                change = change + 1
+                self.prob_head[indx] = (self.prob_head[indx] + self.prob_head[i]) / 2
+                self.prob_head[i] = np.random.rand(self.size)
+        if change ==0:
+            self.prob_choose = np.full(self.num_cls, 1/self.num_cls)
+        return change
         
     def converge_criterion(self, old_prob_choose, old_prob_head):
-        condition1 = np.abs( self.prob_choose - old_prob_choose) < 1e-3
+        condition1 = np.abs( self.prob_choose - old_prob_choose) < 1e-2
         condition2 = np.abs( self.prob_head - old_prob_head) < 1e-2
-        ratio1 = np.sum(condition1)/ (self.num_cls*self.size)
+        ratio1 = np.sum(condition1)/ condition1.size
         ratio2 = np.sum(condition2)/ (self.num_cls*self.size)
         print(f"Condition 1: {ratio1*100:.2f}% | Condition 2: {ratio2*100:.2f}%")
         
-        return True if ratio1> 0.8 and ratio2 > 0.7 else False
+        return True if ratio1> 0.8 and ratio2 > 0.9 else False
         
-    def load_pretrained(self, wc_pth:str, wh_pth:str) -> None:
-        self.prob_choose = np.load(wc_pth)
-        self.prob_head = np.load(wh_pth)
+    def predict(self, pred_data):
+        likelihoods = self.__likelihood(pred_data)
+        pred_cluster = np.argmax(likelihoods, axis=1)
+        if hasattr(self, 'cluster_mapping'):
+            return self.cluster_mapping[pred_cluster]
+        else:
+            return pred_cluster.astype(np.uint8)
     
     def assign_class(self, train_data, train_label):
         '''Use voting system to determine which class belongs to which number.'''
-        preds = self.predict(train_data)
+        pred_cluster = self.predict(train_data)
+        pred2gt_count = np.zeros((self.num_cls, self.num_cls))
         
+        for i in range(self.num_cls):
+            gt = train_label[pred_cluster == i]
+            # pred is i
+            for j in self.label_type:
+                pred2gt_count[i, j] = np.sum(gt == j)
         
-    def predict(self, pred_data):
-        '''For each data'''
-        num_data = pred_data.shape[0]
-        tmp_data =pred_data.reshape(num_data, 1 , self.size)
-        tmp_prob_head = self.prob_head.copy().reshape(1, self.num_cls, self.size)
-        tmp_prob_choose = self.prob_choose.copy().reshape(1, self.num_cls, self.size)
-        log_likelihoods = np.log(tmp_prob_choose*(tmp_data*tmp_prob_head + (1-tmp_data) * (1-tmp_prob_head)))
+        self.cluster_mapping = np.full(self.num_cls, -1) # pred 2 ground truth
+    
+        while -1 in self.cluster_mapping.tolist():
+            usable_pred = np.where(self.cluster_mapping == -1)[0]
+            usable_gt = [ i for i in range(self.num_cls) if i not in self.cluster_mapping.tolist()]
+            gt_max_count = np.max(pred2gt_count[usable_pred, :], axis=0)
+            # print(gt_max_count)
+            order = sorted(usable_gt, key=lambda a: gt_max_count[a], reverse=True)
+            for gt in order:
+                # assigned_indx = [i for i in range(self.num_cls) if i not in self.cluster_mapping.tolist()]
+                pred = usable_pred[np.argmax(pred2gt_count[usable_pred, gt]).astype(np.int32)]            
+                if self.cluster_mapping[pred] != -1:
+                    old_gt = self.cluster_mapping[pred] 
+                    if pred2gt_count[pred, gt] > pred2gt_count[pred, old_gt]:
+                        self.cluster_mapping[pred] = gt                
+                else:
+                    self.cluster_mapping[pred] = gt
         
-        data_log_likelihoods = np.zeros((num_data, self.num_cls), dtype=np.float64)
-        for sz in range(self.size):
-            data_log_likelihoods += log_likelihoods[:, :, sz]
-        results = np.argmax(data_log_likelihoods, axis=1)
-        return results.flatten()
+        pred_label = self.cluster_mapping[pred_cluster]
+        return pred_label.astype(np.uint8)
         
     def confusion_matrix(self, pred, label):
-        ...
-    def get_likelihood_image(self, threshold =0.4):
+        record = dict()
+        for ll in self.label_type:
+            tmp_label = (label == ll).astype(np.int32)
+            tmp_pred = (pred == ll).astype(np.int32)
+            record[ll] = {
+                (i,j): int(np.sum((tmp_pred == i) & (tmp_label == j)))
+                for i in (0, 1) for j in (0, 1)
+            }
+        return record
+    
+    def get_likelihood_image(self, threshold =0.5):
         self.matching = {i:i for i in range(self.num_cls)}
-        print( self.prob_head[0] * self.prob_choose[0])
         images = {
             self.matching[i]: (image>threshold).reshape(self.im_shape)
                 for i, (image) in enumerate(self.prob_head)
         }
         return images
-    
-def em_algorithm(rows, cols, train_data, train_label, test_data, test_label, label_type):
-    global args
-    em_model = EMModel(rows, cols, label_type, batch_size=args.batch_size)
-    # plot_likelihood_images(em_model.get_likelihood_image())
-    
-    if args.em_mode == "train":
-        em_model.fit(train_data, 
-                     SAVE_WEIGHT=args.save_weight, 
-                     wc_pth=args.prob_choose_pth, 
-                     wh_pth=args.prob_head_pth)
-    elif args.em_mode == "load":
-        em_model.load_pretrained(args.prob_choose_pth, args.prob_head_pth)
-    
-    # em_model.assign_class(train_data, train_label)
-    # em_model.predict(train_data)
-    plot_likelihood_images(em_model.get_likelihood_image())
-    
-    
-def plot_likelihood_images(images:dict):
+    @staticmethod
+    def print_confusion(records):
+        for k, record in records.items():
+            print("="*20)
+            print(f"Confusion Matrix {k}:")
+            print(f"\t\tPredict number {k}\tPredict not number {k}")
+            print(f"Is number {k}\t\t{record[(0, 0)]}\t\t\t{record[(0, 1)]}")
+            print(f"Isn't number {k}\t\t{record[(1, 0)]}\t\t\t{record[(1, 1)]}")
+            print("")
+            print(f"Specificity: (Successfully predict number {k}):\t\t", record[(0,0)] / (record[(0,0)] + record[(1,0)]))
+            print(f"Sensitivity: (Successfully predict not number{k} ):\t", record[(1,1)] / (record[(0,1)] + record[(1,1)]))
+            print("="*20)
+
+def plot_likelihood_images(images:dict, mapping=None, save_pth:str=None):
     fig = plt.figure("likelihood images", figsize=(10,5))
     axes = fig.subplots(2,5 )
     axes = axes.flatten()
     for i, ax in enumerate(axes):
         img = images[i].astype(np.uint8) *255
         ax.imshow(img, cmap='gray')
-        ax.set_title(f"digit: {i}")
+        if mapping is None:
+            ax.set_title(f"class: {i}")
+        else:
+            ax.set_title(f"digit: {mapping[i]}")
         ax.axis('off') 
-    fig.tight_layout()
-    plt.show()
+    if save_pth is not None:
+        plt.savefig(save_pth)
+        # time.sleep(1)
+    else:
+        fig.tight_layout()
+        plt.show()
+
+def em_algorithm(rows, cols, train_data, train_label, label_type):
+    global args
+    em_model = EMModel(rows, cols, label_type, batch_size=args.batch_size)
     
-    # plt.pause(1)
+    if args.em_mode == "train":
+        num_iterations = em_model.fit(train_data, 
+                            SAVE_WEIGHT=args.save_weight, 
+                            wc_pth=args.prob_choose_pth, 
+                            wh_pth=args.prob_head_pth)
+    elif args.em_mode == "load":
+        num_iterations = 0
+        em_model.load_pretrained(args.prob_choose_pth, args.prob_head_pth)
+        
+    train_pred = em_model.assign_class(train_data, train_label)
+    confusion = em_model.confusion_matrix(train_pred, train_label)
+    EMModel.print_confusion(confusion)
     
+    error_rate = 1 - np.sum(train_pred == train_label) / len(train_label)
+    print(f"Total iterations: {num_iterations}")
+    print(f"Total error rate: {error_rate:.4}")
+    plot_likelihood_images(em_model.get_likelihood_image(), mapping = em_model.cluster_mapping)
+
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(prog="Machine Learning Homework 4.")
@@ -360,9 +450,6 @@ if __name__ == "__main__":
     elif args.mode == "EM":
         rows, cols, train_data = read_idx3_ubyte("./data/train-images.idx3-ubyte_", threshold=127)
         train_label, label_type = read_idx1_ubyte("./data/train-labels.idx1-ubyte_")
-        _, _, test_data = read_idx3_ubyte("./data/t10k-images.idx3-ubyte_", threshold=127)
-        test_label, label_type = read_idx1_ubyte("./data/t10k-labels.idx1-ubyte_")
-        
-        em_algorithm(rows, cols, train_data, train_label, test_data, test_label, label_type)
+        em_algorithm(rows, cols, train_data, train_label, label_type)
     else:
         assert False, "Wrong input mode."
