@@ -174,6 +174,13 @@ class EMModel:
         self.prob_choose = np.full((self.num_cls, self.size), 1/self.num_cls, dtype=np.float64)
         
         self.batch_size = batch_size
+    @staticmethod
+    def __sum_across_data(arr):
+        summation = np.zeros(arr.shape[1:])
+        for ii in range(arr.shape[0]):
+            summation += arr[ii, :, :]
+        return summation
+    
     def E_step(self, data):
         '''responsibility: (num_data * num_class * size) array
         here we want to get the responsibility of each pixel at each given image.
@@ -182,30 +189,46 @@ class EMModel:
         tmp_data = data.copy().reshape(num_data, 1, self.size)  # (num data, 1, size)
         tmp_prob_head = self.prob_head.reshape(1, self.num_cls, self.size)  # (1, num class, size)
         tmp_prob_choose = self.prob_choose.reshape(1, self.num_cls, self.size) # (1, num class, size)
-        responsibility = tmp_prob_choose*(tmp_data*tmp_prob_head + (1- tmp_data) * (1-tmp_prob_head)) # (num_data, num_class, size)
-        # Normalize responsibility
-        sum_across_class = np.zeros((num_data, 1, self.size)) # (num_data, 1, size)
-        for cc in range(self.num_cls):    
-            sum_across_class += responsibility[:, cc:cc+1, :]
-        sum_across_class[sum_across_class< 1e-4] = np.inf
         
-        responsibility =  responsibility/sum_across_class
-        return responsibility
+        W = tmp_prob_choose* (tmp_data*tmp_prob_head + (1- tmp_data) * (1-tmp_prob_head))# (num_data, num_class, size)
+        # base = 100
+        # shift = 3
+        # print(np.any(responsibility == 0))
+        
+        # print(tmp_prob_head[0, 0, base:base+shift])
+        # print(tmp_prob_choose[0, 0, base:base+shift])
+        # print(tmp_data[0, 0, base:base+shift])
+        # print(responsibility[0, 0, base:base+shift])
+        # exit()
+        
+        # Normalize responsibility
+        marginal_W = np.zeros((num_data, 1, self.size)) # (num_data, 1, size)
+        for cc in range(self.num_cls):    
+            marginal_W += W[:, cc:cc+1, :]
+        marginal_W[marginal_W == 0] = 1e9
+        resp =  W/marginal_W
+        
+        # c1, c2, c3 = np.where(np.isnan(resp))
+        
+        # print( responsibility[np.where(np.isnan(resp))] )
+        # print(sum_across_class[ c1,0, c3])
+        # if np.any(np.isnan(resp)):
+            # print(responsibility)
+            # exit()
+        return resp
         
     def M_step(self, data, responsibility):
-        def __sum_across_data(arr):
-            summation = np.zeros(arr.shape[1:])
-            for ii in range(arr.shape[0]):
-                summation += arr[ii, :, :]
-            return summation
+            
         num_data = data.shape[0]
         # Update prob_choose
-        res_sum = __sum_across_data(responsibility)
-        res_sum[res_sum < 1e-4] = np.inf
+        res_sum = self.__sum_across_data(responsibility)
         new_prob_choose = res_sum / num_data   # * Something I can't derive the correct answer bute it works.
         # Update prob head
-        nominator = __sum_across_data( responsibility * data.copy().reshape(num_data, 1, self.size))
+        nominator = self.__sum_across_data( responsibility * data.copy().reshape(num_data, 1, self.size))
+        res_sum[res_sum < 1e-10] = np.inf
         new_prob_head = nominator / res_sum
+        
+        # print(np.any(np.isnan(new_prob_choose)), np.any(np.isnan(new_prob_head)))
         
         return new_prob_choose, new_prob_head
     @property
@@ -275,8 +298,9 @@ class EMModel:
         
     def confusion_matrix(self, pred, label):
         ...
-    def get_likelihood_image(self, threshold =0.5):
+    def get_likelihood_image(self, threshold =0.4):
         self.matching = {i:i for i in range(self.num_cls)}
+        print( self.prob_head[0] * self.prob_choose[0])
         images = {
             self.matching[i]: (image>threshold).reshape(self.im_shape)
                 for i, (image) in enumerate(self.prob_head)
@@ -286,7 +310,7 @@ class EMModel:
 def em_algorithm(rows, cols, train_data, train_label, test_data, test_label, label_type):
     global args
     em_model = EMModel(rows, cols, label_type, batch_size=args.batch_size)
-    plot_likelihood_images(em_model.get_likelihood_image())
+    # plot_likelihood_images(em_model.get_likelihood_image())
     
     if args.em_mode == "train":
         em_model.fit(train_data, 
@@ -307,7 +331,6 @@ def plot_likelihood_images(images:dict):
     axes = axes.flatten()
     for i, ax in enumerate(axes):
         img = images[i].astype(np.uint8) *255
-        
         ax.imshow(img, cmap='gray')
         ax.set_title(f"digit: {i}")
         ax.axis('off') 
