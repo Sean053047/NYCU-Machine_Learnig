@@ -230,8 +230,6 @@ class EMModel:
         '''
         num_data = data.shape[0]
         likelihood = self.__likelihood(data) # (num_data, num_cls)
-        if np.any(np.isnan(likelihood)):
-            exit()
         marginal = np.zeros((num_data,1), dtype=np.float64)
         for cc in range(self.num_cls):
             marginal += likelihood[:, cc:cc+1]
@@ -280,6 +278,7 @@ class EMModel:
             np.save(wh_pth, self.prob_head)
             print("Save weight.")
         return i 
+    
     def merge_and_split(self, threshold = 0.1):
         src = self.prob_head.copy().reshape(self.num_cls, 1, self.size)
         src = np.where(src>threshold, src, 0.0)
@@ -376,16 +375,16 @@ class EMModel:
         }
         return images
     @staticmethod
-    def print_confusion(records):
+    def print_confusion(records): # Slightly modified
         for k, record in records.items():
             print("="*20)
             print(f"Confusion Matrix {k}:")
             print(f"\t\tPredict number {k}\tPredict not number {k}")
-            print(f"Is number {k}\t\t{record[(0, 0)]}\t\t\t{record[(0, 1)]}")
-            print(f"Isn't number {k}\t\t{record[(1, 0)]}\t\t\t{record[(1, 1)]}")
+            print(f"Is number {k}\t\t{record[(1, 1)]}\t\t\t{record[(0, 1)]}")
+            print(f"Isn't number {k}\t\t{record[(1, 0)]}\t\t\t{record[(0, 0)]}")
             print("")
-            print(f"Specificity: (Successfully predict number {k}):\t\t", record[(0,0)] / (record[(0,0)] + record[(1,0)]))
-            print(f"Sensitivity: (Successfully predict not number{k} ):\t", record[(1,1)] / (record[(0,1)] + record[(1,1)]))
+            print(f"Sensitivity: (Successfully predict number {k}):\t\t", record[(1,1)] / (record[(0,1)] + record[(1,1)]))
+            print(f"Specificity: (Successfully predict not number{k} ):\t", record[(0,0)] / (record[(1,0)] + record[(0,0)]))
             print("="*20)
 
 def plot_likelihood_images(images:dict, mapping=None, save_pth:str=None):
