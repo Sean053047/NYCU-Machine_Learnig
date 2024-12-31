@@ -9,7 +9,6 @@ class Kernel:
         self.kernel_method = kernel_method
         for k,v in kernel_kwds.items():
             setattr(self, k, v)
-    
     def __call__(self, x, y ):
         kernel = getattr(self, self.kernel_method)
         return kernel(x, y)
@@ -23,7 +22,13 @@ class Kernel:
         return np.exp(-self.r * cdist(x,y, 'euclidean')**2 )
     def polynomial(self, x, y):
         return (x@ y.T + self.c) ** self.d  
-
+    def __repr__(self):
+        if self.kernel_method == 'linear':
+            return self.kernel_method
+        elif self.kernel_method == 'polynomial':
+            return self.kernel_method + f"_c:{self.c}_d:{self.d}"
+        elif self.kernel_method == 'rbf':
+            return self.kernel_method + f"_r:{self.r}"
 class KNN:
     def __init__(self, nn:int):
         self.nn = nn 
@@ -43,7 +48,8 @@ class KNN:
         tgt = tf_func(tgt, *func_args, **func_kwds)
         
         dist = cdist(src, tgt, metric='euclidean')
-        neighbors = np.argsort(dist, axis=1)[:, :self.nn] # Select nn tgt, which are top nn nearest element to src.
+        # Select nn tgt, which are top nn nearest element to src.
+        neighbors = np.argsort(dist, axis=1)[:, :self.nn] 
         # Return the most frequent element
         pred = list()
         for neighbor in neighbors:
@@ -63,25 +69,15 @@ class DimensionReduction(KNN):
         self.kernel = None if kernel_method is None else Kernel(kernel_method, **kernel_kwds)
         super().__init__(nn)
         
-    def load(self, pth):
-        self.w = np.load(pth)
-        return self
-    
-    def save(self, pth):
-        np.save(pth, self.w)
-    
-    def _eig(self, arr):
-        eig_value, eig_vector = np.linalg.eig(arr)
-        order = np.argsort(-eig_value)
-        return eig_vector[:, order].real
-    
     @property
     def C(self):
         raise NotImplementedError()
     
     def fit(self, x, label):
         super().fit(x, label)
-        self.w = self._eig(self.C)
+        eig_value, eig_vector = np.linalg.eig(self.C)
+        order = np.argsort(-eig_value)
+        self.w = eig_vector[:, order].real
         self.w = self.w / np.linalg.norm(self.w, axis=0, keepdims=True)
         return self
     
@@ -93,18 +89,16 @@ class DimensionReduction(KNN):
     def reconstruct(self, x:np.ndarray, num_eig:int):
         # x: (bs, dim)
         w = self.w[:, :num_eig]
-        reconstruct = w @ w.T @ x.T # (dim, bs)
-        return reconstruct.T # (bs, dim)
+        return x @ w @ w.T # (bs, dim)
+    
     def predict(self, x:np.ndarray, num_eig:int):
         if self.kernel is None:
-            # Pass test data, transform function and related arguments into KNN.
             return super().predict(x, tf_func=self.transform, num_eig=num_eig) 
         else:
             x = self.kernel(x, self.data)        
             tgt = self.kernel(self.data, self.data)
             return super().predict(x, tgt=tgt, tf_func=self.transform, num_eig=num_eig, )
 
-    
 class PCA(DimensionReduction):
     def __init__(self, nn:int, kernel_method:str=None, **kernel_kwds):
         super().__init__(nn, kernel_method, **kernel_kwds)
@@ -124,9 +118,6 @@ class PCA(DimensionReduction):
         return K - one_N @ K - K @ one_N + one_N @ K @ one_N
             
 class LDA(DimensionReduction):
-    def __init__(self, nn:int, kernel_method:str=None, **kernel_kwds):
-        super().__init__(nn, kernel_method, **kernel_kwds)
-    
     @property
     def C(self):
         return self._general_C(self.data, self.label) if self.kernel is None else self._kernel_C(self.data, self.label)
@@ -161,12 +152,10 @@ class LDA(DimensionReduction):
         
         return np.linalg.pinv(Cw) @ Cb    
 
-def map2image(img):
-    img = img.copy()
-    return (img - np.min(img)) / (np.max(img) - np.min(img))
-
 def draw(eig_faces, nr, nc,  im_shape, pth):
     # eig_faces: (bs, dim)
+    def map2image(img):
+        return (img - np.min(img)) / (np.max(img) - np.min(img))
     fig, axes = plt.subplots(nr, nc, figsize=(12, 8))
     axes = axes.flatten()
     for i, face in enumerate(eig_faces):
@@ -226,7 +215,7 @@ def load_data(root:str, split:str, resize_shape):
 def parse_args():
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument('model', choices=['pca', 'lda'])
+    parser.add_argument('model', choices=['pca', 'lda', 'iter'])
     parser.add_argument('--kernel', type=str, help="linear | polynomial | rbf") 
     parser.add_argument('--root', type=str, default='./Yale_Face_Database')
     parser.add_argument('-d', type=float, default=1.5, help="Constant for polynomial kernel")
@@ -234,6 +223,13 @@ def parse_args():
     parser.add_argument('-r', type=float, default=1e-8, help="Gamma of RBF kernel")
     parser.add_argument('--plot_dim', type=int, default=2)
     return parser.parse_args()
+
+def choose_model(model, nn, kernel_method, c, d, r):
+    if model == 'pca':
+        model = PCA(nn, kernel_method, c=c, d=d, r=r)
+    elif model == 'lda':
+        model = LDA(nn, kernel_method, c=c, d=d, r=r)
+    return model    
 
 def process(model, train_data, train_label, test_data, test_label):
     global resize_shape, num_eig, random_faces
@@ -244,8 +240,9 @@ def process(model, train_data, train_label, test_data, test_label):
         draw(model.w[:, :25].T, 5, 5, resize_shape, f'{model_name}_eigen_faces.png')    
         reconstruct = model.reconstruct(random_faces, num_eig)
         draw(np.concatenate([reconstruct,random_faces], axis=0), 2, 10, resize_shape, f'{model_name}_reconstruction.png')   
+    title = model_name if model.kernel is None else f"{model.kernel}_{model_name}"
     pred = model.predict(test_data, num_eig=num_eig)
-    acc, unknown_ratio = calculate_performance(pred, test_label, title=model_name)
+    acc, unknown_ratio = calculate_performance(pred, test_label, title=title)
     return acc, unknown_ratio
 
 if __name__ == "__main__":
@@ -264,16 +261,40 @@ if __name__ == "__main__":
     train_data, train_labels, train_attrs = load_data(root, split='Training', resize_shape=resize_shape)
     test_data, test_labels, test_attrs = load_data(root, split='Testing', resize_shape=resize_shape)
     # Random sample faces
+    np.random.seed(10)
     rindx = np.random.randint(0, len(train_data), size=10)
     random_faces = train_data[rindx, ...]
     # Initialize model
-    if model == 'pca':
-        model = PCA(nn, kernel_method, c=args.c, d=args.d, r=args.r)
-    elif model == 'lda':
-        model = LDA(nn, kernel_method, c=args.c, d=args.d, r=args.r)
-    process(model, 
-            train_data,
-            train_labels,
-            test_data, 
-            test_labels,
-            )
+    if model =='iter':
+        if kernel_method == 'rbf':
+            for model_name in ('pca', 'lda'):
+                for r in np.r_[1:10]:
+                    r *= 1e-6
+                    model = choose_model(model_name, nn, kernel_method, c=args.c, d=args.d, r=r)
+                    process(model, 
+                        train_data,
+                        train_labels,
+                        test_data, 
+                        test_labels,
+                        )
+                print()
+        elif kernel_method == 'linear':
+            for model_name in ('pca', 'lda'):
+                model = choose_model(model_name, nn, kernel_method, args.c, args.d, args.r)
+                process(model, train_data, train_labels, test_data, test_labels)
+        elif kernel_method =='polynomial':
+            for model_name in ('pca', 'lda'):
+                for d in (2, 4, 6):
+                    for c in np.r_[0:100:10]:
+                            model = choose_model(model_name, nn, kernel_method, c, d, args.r)
+                            process(model, train_data, train_labels, test_data, test_labels)
+                    print()
+                print()
+    else:
+        model = choose_model(model,nn, kernel_method, c=args.c, d=args.d, r=args.r)
+        process(model, 
+                train_data,
+                train_labels,
+                test_data, 
+                test_labels,
+                )
