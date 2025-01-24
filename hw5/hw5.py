@@ -101,27 +101,25 @@ class svm_utils:
     @staticmethod
     def make_args( kernel, *args, **kwargs):
         svm_args = ['-s', '0']
-        if kernel == 'rbf':
-            c = kwargs.get('c') if 'c' in kwargs else args[0]
-            g = kwargs.get('g') if 'g' in kwargs else args[1]
-            svm_args.extend( ['-t', '2', '-c', str(c), '-g', str(g)])
-            return svm_args 
+        if kernel == 'linear':
+            k_opt = 0 
         elif kernel ==  'poly':
-            c = kwargs.get('c') if 'c' in kwargs else args[0]
-            g = kwargs.get('g') if 'g' in kwargs else args[1]
-            r = kwargs.get('r') if 'r' in kwargs else args[2]
-            d = kwargs.get('d') if 'd' in kwargs else args[3]
-            svm_args.extend(['-t', '1', '-c', str(c), '-g', str(g), '-r', str(r), '-d', str(d)])        
-            return svm_args    
-        elif kernel == 'linear':
-            c = kwargs.get('c') if 'c' in kwargs else args[0]
-            svm_args.extend(['-t', '-0', '-c', str(c)])
-            return svm_args 
+            k_opt = 1
+        elif kernel == 'rbf':
+            k_opt = 2
         elif kernel == 'lrbf':
-            c = kwargs.get('c') if 'c' in kwargs else args[0]
-            g = kwargs.get('g') if 'g' in kwargs else args[1]
-            svm_args.extend( ['-t', '4', '-c', str(c), '-g', str(g)])
-            return svm_args 
+            k_opt = 4
+        svm_args.extend( ['-t', str(k_opt)])
+        c = kwargs.get('c') if 'c' in kwargs else args[0] if len(args) > 0 else None
+        g = kwargs.get('g') if 'g' in kwargs else args[1] if len(args) > 1 else None
+        r = kwargs.get('r') if 'r' in kwargs else args[2] if len(args) > 2 else None
+        d = kwargs.get('d') if 'd' in kwargs else args[3] if len(args) > 3 else None
+        if c is not None: svm_args.extend(['-c', f'{c}'])
+        if g is not None: svm_args.extend(['-g', f'{g}'])
+        if r is not None: svm_args.extend(['-r', f'{r}'])
+        if d is not None: svm_args.extend(['-d', f'{d}'])
+        
+        return svm_args 
 
     @staticmethod
     def args_to_dict(svm_args:list):
@@ -137,16 +135,15 @@ class svm_utils:
                 out['d'] = float(svm_args[i+1])
         return out
             
-    def get_best_params(self, kernel):
+    def __get_best_params_dict(self, kernel):
         svm_args = max(self.record[kernel], key=lambda a: a[1])[0]
         params_best = {svm_args[i-1].strip('-'):svm_args[i] 
                     for i in range(1, len(svm_args)) if svm_args[i-1] in ('-g', '-r', '-d', '-c')
                 }
         return params_best
     
-    def search_best_param(self, y_train, x_train, kernel, num_folds:int):
+    def search_best_param(self, y_train, x_train, kernel, num_folds:int, mode:str):
         print(f"Grid Search hyperparameters of {kernel} kernel with {num_folds}-fold cross validation")
-        stop_iter_ratio = 0.2
         # * Best: C = 0.03
         if kernel == "linear":
             params_ranges = { 'c': np.arange(0.01, 3, step=0.01),}
@@ -164,11 +161,12 @@ class svm_utils:
             }
         elif kernel == 'lrbf':
             params_ranges = {
-                'c': np.arange(0.01, 3, step=0.01),
-                'g': np.arange(0.01, 5, step=0.02)
+                'c': np.arange(0.01, 5, step=0.2),
+                'g': np.arange(0.01, 5, step=0.2)
             }
         def coordinate_search():
             nonlocal self, y_train, x_train, kernel, num_folds, params_ranges
+            stop_iter_ratio = 0.2
             params_best ={ k: v[0] for k,v in params_ranges.items()}
             for iter in range(3):
                 # Use the idea of coordinate descent.
@@ -176,7 +174,7 @@ class svm_utils:
                 for param, param_range in  params_ranges.items():
                     print(f"Optimize {param}, best_params: {params_best}")
                     if iter != 0:
-                        params_best = self.get_best_params(kernel)
+                        params_best = self.__get_best_params_dict(kernel)
                         print("Reassign params_best:", params_best)
                     max_acc, lower_count = 0.0, 0     
                     tmp_params = params_best
@@ -184,7 +182,7 @@ class svm_utils:
                     for val in param_range:
                         tmp_params[param] = val                    
                         svm_args = self.make_args(kernel, **tmp_params) + ['-v', str(num_folds), '-q']
-                        _feature = x_train if kernel != 'lrbf' else self.linear_rbf(x_train, x_train, tmp_params['g'])
+                        _feature = x_train if kernel != 'lrbf' else self.linear_rbf(x_train, x_train, float(tmp_params['g']))
                         acc = svm_train(y_train, _feature, svm_args)
                         self.record[kernel].append((svm_args, acc))
                         
@@ -200,20 +198,29 @@ class svm_utils:
         def grid_search():
             nonlocal self, y_train, x_train, kernel, num_folds, params_ranges
             if kernel == 'linear':
-                all_params = [ {'c':v } for v in params_ranges['c']]
+                params_indxes = [ (i,) for i in range(len(params_ranges['c']))]
             elif kernel == 'rbf' or kernel == 'lrbf':
-                all_params = [ {'c':vc, 'g':vg} for vc in params_ranges['c'] for vg in params_ranges['g']]
-            
-            for tmp_params in all_params:
+                params_indxes = [ (i, j) for i in range(len(params_ranges['c'])) \
+                                        for j in range(len(params_ranges['g']))]
+            params_type = ('c') if kernel == 'linear' else \
+                            ('c', 'g') if kernel == 'lrbf' or kernel == 'rbf' else None
+            heatmap = np.zeros([len(params_ranges[param]) for param in params_type])
+            for params_indx in tqdm(params_indxes, desc=f"{kernel} optimization:"):
+                tmp_params = { param:params_ranges[param][indx] \
+                                for param, indx in zip(params_type, params_indx)}
                 svm_args = self.make_args(kernel, **tmp_params) + ['-v', str(num_folds), '-q']
                 _feature = x_train if kernel != 'lrbf' else self.linear_rbf(x_train, x_train, tmp_params['g'])
                 acc = svm_train(y_train, _feature, svm_args)
                 self.record[kernel].append((svm_args, acc))
+                heatmap[params_indx] = acc
+            self.save_heatmap(kernel, heatmap, params_ranges, num_folds)
         
-        if kernel =='poly':
+        
+        if kernel == 'poly' or mode == 'coordinate':
             coordinate_search()
-        else:
+        elif mode == 'grid':
             grid_search()
+            
         return max(self.record[kernel], key=lambda a: a[1])
         
     @staticmethod
@@ -225,18 +232,38 @@ class svm_utils:
         ), axis= 1)
         return out 
 
+    @staticmethod
+    def save_heatmap(kernel, heatmap, params_ranges, num_folds):
+        if heatmap.ndim == 1:
+            heatmap= heatmap.reshape(-1, 1)
+        plt.figure(figsize=(10,10,))
+        plt.imshow(heatmap, cmap='coolwarm', interpolation='nearest')
+        plt.colorbar(label='Accuracy')
+        plt.title(f'{num_folds} cross-validation')
+        plt.ylabel(f'c')
+        plt.yticks(ticks=np.arange(len(params_ranges['c'])), labels=[f"{v:.2f}" for v in params_ranges['c']])
+        if kernel!= 'linear':
+            plt.xlabel(f'g')    
+            plt.xticks(ticks=np.arange(len(params_ranges['g'])), labels=[f"{v:.2f}" for v in params_ranges['g']])
+        for i in range(heatmap.shape[0]):
+            for j in range(heatmap.shape[1]):
+                acc = heatmap[i, j]
+                plt.text(j, i, f'{acc:.2f}', ha='center', va='center', color='black')
+        plt.savefig(f'{kernel}_heatmap.jpg')
 def svm():  
     global x_train, y_train, x_test, y_test, args
     svmu = svm_utils()
     num_folds = 5 
     # * Find best hyper parameters
-    if args.optimize:
+    if args.optimize is not None:
         json_data = dict()
-        for kernel in [ 'linear', 'rbf', 'poly', 'lrbf']:
-            best_args, best_acc = svmu.grid_search(y_train, x_train, kernel, num_folds)
-            json_data[kernel] = svmu.args_to_dict(best_args).update({'best':best_acc})
-        with open('best_params.json', 'w') as file:
-            json.dump(json_data, file, indent=4)    
+        for kernel in [ 'lrbf']:
+            best_args, best_acc = svmu.search_best_param(y_train, x_train, kernel, num_folds, mode=args.optimize)
+            svm_args_dict = svmu.args_to_dict(best_args)
+            svm_args_dict.update({'best': best_acc})
+            json_data[kernel] = svm_args_dict
+            with open('best_params.json', 'w') as file:
+                json.dump(json_data, file, indent=4)    
     else:
         params = { k:getattr(args, k) for k in ('c', 'g', 'r', 'd') if hasattr(args, k) and getattr(args, k) != None}
         svm_args = svmu.make_args(args.kernel, **params) +['-q']
@@ -256,7 +283,7 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(prog='ML hw5')
     parser.add_argument('mode', type=str, help='gp | svm')
-    parser.add_argument('--optimize', action="store_true")
+    parser.add_argument('--optimize', type=str, default= None, help='grid | coordinate')
     # Gaussian Process
     parser.add_argument('--var', type=float)
     parser.add_argument('--alpha', type=float)
@@ -281,4 +308,4 @@ if __name__ == "__main__":
         y_train = np.loadtxt('data/Y_train.csv', delimiter=',', dtype=np.uint8)
         x_test = np.loadtxt('data/X_test.csv', delimiter=',', dtype=np.float64)
         y_test = np.loadtxt('data/Y_test.csv', delimiter=',', dtype=np.uint8)
-        svm()
+        svm()    

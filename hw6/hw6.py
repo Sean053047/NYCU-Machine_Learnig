@@ -215,19 +215,27 @@ def draw_eigenvector( out_fpth, guess, W):
     colors = [ (0, 0, 255), (0,255,0), (255,0,0)]
     num_cluster = len(np.unique(guess))
     fig = plt.figure()
-    ax = fig.add_subplot( projection='3d')
     
-    for i, color in zip(range(num_cluster), colors):    
-        ex_row = np.where(guess == i)[0]     
-        ex_coor = W[ex_row, :] 
-        x = ex_coor[:, 0]
-        y = ex_coor[:, 1]
-        if ex_coor.shape[1] == 2:
-            z = np.zeros_like(x)
-        elif ex_coor.shape[1] == 3:
-            z = ex_coor[:, 2]
+    if W.shape[1] ==3:
+        ax = fig.add_subplot( projection='3d')
         
-        ax.scatter(x, y, z, color, label=f'cluster {i}' )
+        for i, color in zip(range(num_cluster), colors):    
+            ex_row = np.where(guess == i)[0]     
+            ex_coor = W[ex_row, :] 
+            x = ex_coor[:, 0]
+            y = ex_coor[:, 1]
+            z = ex_coor[:, 2]
+            ax.scatter(x, y, z, color, label=f'cluster {i}' )
+    elif W.shape[1] == 2:
+        ax = fig.add_subplot()
+        for i, color in zip(range(num_cluster), colors):
+            ex_row = np.where(guess==i)[0]
+            ex_coor = W[ex_row, :]
+            x = ex_coor[:, 0]
+            y = ex_coor[:, 1]
+            color = (np.array(color) / 255)[np.newaxis,  :]
+            color = color.repeat(len(x), axis=0)
+            ax.scatter( x, y, c = color, label = f"cluster {i}") 
     plt.legend()
     plt.xlabel('x')
     plt.ylabel('y')
@@ -271,9 +279,9 @@ def part1(s:float=1.0, c:float=1.0):
     output_folder = './part1'
     for image_pth in ("image1.png", "image2.png"):
         IMG = Path(image_pth).stem        
-        launch_process(image_pth=image_pth, s=s, c=c, model=Kmeans, num_cluster=2, output_folder =output_folder)
+        # launch_process(image_pth=image_pth, s=s, c=c, model=Kmeans, num_cluster=2, output_folder =output_folder)
         launch_process(image_pth=image_pth, s=s, c=c, model=Spectral, num_cluster=2, mode='ratio', output_folder =output_folder)
-        launch_process(image_pth=image_pth, s=s, c=c, model=Spectral, num_cluster=2, mode='normalized', output_folder =output_folder)
+        # launch_process(image_pth=image_pth, s=s, c=c, model=Spectral, num_cluster=2, mode='normalized', output_folder =output_folder)
 
 def part2(s:float=1.0, c:float=1.0):
     global IMG
